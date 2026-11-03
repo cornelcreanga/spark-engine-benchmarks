@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+if [[ $# -lt 2 ]]; then
+  echo "Usage: scripts/bench plan|provision|image|prepare|generate|run|reset|validate|validate-trino CONFIG [ENGINE ...]" >&2
+  exit 2
+fi
+./gradlew :runner:installDist :jobs:jar
+exec runner/build/install/runner/bin/runner "$@"

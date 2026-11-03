@@ -1,0 +1,145 @@
+plugins {
+    id 'base'
+}
+
+ext {
+    sparkVersion = findProperty('sparkVersion') ?: '4.0.2'
+    compileSparkVersion = findProperty('compileSparkVersion') ?: sparkVersion
+    scalaBinary = findProperty('scalaBinary') ?: '2.13'
+    icebergVersion = '1.12.0'
+}
+
+subprojects {
+    apply plugin: 'java'
+    group = 'dev.sparkbench'
+    version = '0.1.0'
+    repositories {
+        mavenCentral()
+    }
+    java {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    tasks.withType(JavaCompile).configureEach {
+        options.release = 17
+    }
+}
+
+project(':dataset-generator') {
+    dependencies {
+        implementation project(':core')
+        testImplementation "org.apache.spark:spark-sql_${scalaBinary}:${compileSparkVersion}"
+        testImplementation "org.apache.iceberg:iceberg-api:${icebergVersion}"
+        testRuntimeOnly "org.apache.iceberg:iceberg-bundled-guava:${icebergVersion}"
+        compileOnly "org.apache.spark:spark-sql_${scalaBinary}:${compileSparkVersion}"
+        compileOnly "org.apache.iceberg:iceberg-api:${icebergVersion}"
+    }
+}
+
+project(':benchmarks') {
+    dependencies {
+        implementation project(':core')
+        implementation project(':results')
+        compileOnly "org.apache.spark:spark-sql_${scalaBinary}:${compileSparkVersion}"
+    }
+}
+
+project(':results') {
+    dependencies {
+        implementation project(':core')
+    }
+}
+
+project(':jobs') {
+    dependencies {
+        implementation project(':core')
+        implementation project(':dataset-generator')
+        implementation project(':benchmarks')
+        implementation project(':results')
+        compileOnly "org.apache.spark:spark-sql_${scalaBinary}:${compileSparkVersion}"
+    }
+    tasks.named('jar') {
+        archiveFileName = 'spark-bench-jobs.jar'
+        duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+        from {
+            configurations.runtimeClasspath.collect {
+                it.isDirectory() ? it : zipTree(it)
+            }
+        }
+        manifest {
+            attributes 'Main-Class': 'dev.sparkbench.jobs.Main'
+        }
+    }
+}
+
+project(':runner') {
+    apply plugin: 'application'
+    dependencies {
+        implementation project(':core')
+    }
+    application {
+        mainClass = 'dev.sparkbench.runner.Main'
+    }
+}
+
+project(':spark-images') {
+    tasks.register('buildImage', JavaExec) {
+        dependsOn ':jobs:jar', ':runner:classes'
+        classpath = project(':runner').sourceSets.main.runtimeClasspath
+        mainClass = 'dev.sparkbench.runner.Main'
+        workingDir = rootDir
+        args 'image', (rootProject.findProperty('config') ?: 'config/local.properties'),
+        (rootProject.findProperty('engine') ?: 'config/engines/oss.properties')
+    }
+}
+
+project(':infrastructure') {
+    tasks.register('provision', JavaExec) {
+        dependsOn ':runner:classes'
+        classpath = project(':runner').sourceSets.main.runtimeClasspath
+        mainClass = 'dev.sparkbench.runner.Main'
+        workingDir = rootDir
+        args 'provision', (rootProject.findProperty('config') ?: 'config/local.properties')
+    }
+}
+
+tasks.register('verify', JavaExec) {
+    dependsOn ':runner:classes'
+    classpath = project(':runner').sourceSets.main.runtimeClasspath
+    mainClass = 'dev.sparkbench.runner.SelfTest'
+    workingDir = rootDir
+}
+
+project(':dataset-generator') {
+    tasks.register('verifyDataset', JavaExec) {
+        dependsOn testClasses
+        classpath = sourceSets.test.runtimeClasspath
+        mainClass = 'dev.sparkbench.dataset.EventsSelfTest'
+        workingDir = rootDir
+    }
+}
+
+tasks.named('verify') {
+    dependsOn ':dataset-generator:verifyDataset'
+}
+
+project(':jobs') {
+    dependencies {
+        testImplementation "org.apache.spark:spark-sql_${scalaBinary}:${compileSparkVersion}"
+        testRuntimeOnly "org.apache.iceberg:iceberg-spark-runtime-4.0_${scalaBinary}:${icebergVersion}"
+        testRuntimeOnly "org.apache.iceberg:iceberg-aws-bundle:${icebergVersion}"
+    }
+    tasks.register('verifyEventTable', JavaExec) {
+        dependsOn testClasses
+        classpath = sourceSets.test.runtimeClasspath
+        mainClass = 'dev.sparkbench.jobs.EventTableIntegrationTest'
+        workingDir = rootDir
+        maxHeapSize = '1g'
+        jvmArgs '--add-opens=java.base/sun.nio.ch=ALL-UNNAMED',
+                '--add-opens=java.base/java.nio=ALL-UNNAMED'
+    }
+}
+
+tasks.named('verify') {
+    dependsOn ':jobs:verifyEventTable'
+}

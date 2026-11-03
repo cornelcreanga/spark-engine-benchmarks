@@ -1,0 +1,2 @@
+rootProject.name = 'spark-engine-benchmarks'
+include 'core', 'dataset-generator', 'benchmarks', 'results', 'jobs', 'runner', 'spark-images', 'infrastructure'

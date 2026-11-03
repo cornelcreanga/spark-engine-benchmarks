@@ -1,0 +1,12 @@
+.gradle/
+**/build/
+build/
+*.log
+__pycache__/
+
+# Local editor settings and credentials
+.idea/
+*.iml
+.env
+.env.*
+.DS_Store
