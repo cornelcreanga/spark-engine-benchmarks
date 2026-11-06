@@ -72,7 +72,18 @@ public final class Events implements MapPartitionsFunction<Long, Row>, Serializa
         return weights.length - 1;
     }
 
+    private record Context(EventMetadata metadata, EventType type, SplittableRandom random) {}
+
+    public EventMetadata metadata(long index) {
+        return context(index).metadata();
+    }
+
     public MachineEvent event(long index) {
+        Context context = context(index);
+        return EventFactory.create(context.type(), context.metadata(), context.random());
+    }
+
+    private Context context(long index) {
         SplittableRandom random = random(index);
         int bucket = choose(random, bucketWeights);
         EventType type = EventType.values()[choose(random, eventWeights)];
@@ -90,7 +101,7 @@ public final class Events implements MapPartitionsFunction<Long, Row>, Serializa
                         systemId,
                         "host-" + systemOrdinal,
                         "user-" + random.nextInt(100));
-        return EventFactory.create(type, metadata, random);
+        return new Context(metadata, type, random);
     }
 
     public Row row(long index) {
@@ -105,7 +116,8 @@ public final class Events implements MapPartitionsFunction<Long, Row>, Serializa
         // Stable for the same customer/system ordinal, independently of event order or tasks.
         return uuid(
                         mix64(customer.getMostSignificantBits() ^ seed ^ 0x13198a2e03707344L),
-                        mix64(customer.getLeastSignificantBits() ^ seed ^ 0xa4093822299f31d0L)).toString();
+                        mix64(customer.getLeastSignificantBits() ^ seed ^ 0xa4093822299f31d0L))
+                .toString();
     }
 
     private static UUID uuid(SplittableRandom random) {

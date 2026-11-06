@@ -99,19 +99,34 @@ public final class Compaction {
                         .put("image", c.get("engine.image"))
                         .put("sparkVersion", spark.version())
                         .put("strategy", c.get("benchmark.compactionStrategy", "sort"))
+                        .put("cacheMode", c.get("benchmark.cacheMode", "none"))
+                        .put("discardOutputs", c.flag("benchmark.discardOutputs"))
                         .put("validationEnabled", c.validationEnabled())
                         .put("configuration", redacted(c));
         Throwable failure = null;
+        Set<Long> snapshotsBefore = Set.of();
         try {
             reset(spark, c);
             report.put("baselineSnapshot", baseline(spark, c));
+            if (c.flag("benchmark.discardOutputs")) snapshotsBefore = snapshotIds(spark, c);
             Map<String, Object> before = stats(spark, c);
             String checksum = c.validationEnabled() ? fingerprint(spark, c) : null;
             report.put("before", before).put("fingerprintBefore", checksum);
             String sql = compactionSql(c);
+            Map<String, Object> warmup = null;
+            if (c.get("benchmark.cacheMode", "none").equals("warm")) {
+                warmup = WarmCache.await(spark, c);
+                report.put("warmup", warmup);
+            }
             spark.sparkContext().listenerBus().waitUntilEmpty(30000);
             TaskCounters counters = new TaskCounters();
             spark.sparkContext().addSparkListener(counters);
+            if (warmup != null) {
+                report.put(
+                        "warmupToStartMillis",
+                        System.currentTimeMillis()
+                                - ((Number) warmup.get("checkedAtEpochMillis")).longValue());
+            }
             long started = System.nanoTime();
             Dataset<Row> result;
             List<Row> output;
@@ -159,12 +174,22 @@ public final class Compaction {
             failure = e;
             report.put("status", "failed").put("error", e.toString());
         } finally {
-            if (failure == null && c.flag("benchmark.deferRestore")) {
+            if (failure == null
+                    && c.flag("benchmark.deferRestore")
+                    && !c.flag("benchmark.discardOutputs")) {
                 report.put("baselineRestored", false).put("restorationDeferredForValidation", true);
             } else {
                 try {
                     reset(spark, c);
                     report.put("baselineRestored", true);
+                    if (c.flag("benchmark.discardOutputs")) {
+                        long cleanupStarted = System.nanoTime();
+                        report.put(
+                                "outputSnapshotsExpired",
+                                discardNewSnapshots(spark, c, snapshotsBefore));
+                        report.put(
+                                "outputCleanupSeconds", (System.nanoTime() - cleanupStarted) / 1e9);
+                    }
                 } catch (Throwable restore) {
                     report.put("baselineRestored", false).put("restoreError", restore.toString());
                     if (failure == null) {
@@ -181,6 +206,58 @@ public final class Compaction {
         }
     }
 
+    private static Set<Long> snapshotIds(SparkSession spark, Config c) {
+        Set<Long> ids = new HashSet<>();
+        for (Row row :
+                spark.sql("SELECT snapshot_id FROM " + c.table() + ".snapshots").collectAsList()) {
+            ids.add(row.getLong(0));
+        }
+        return ids;
+    }
+
+    private static int discardNewSnapshots(SparkSession spark, Config c, Set<Long> before) {
+        Set<Long> fresh = snapshotIds(spark, c);
+        fresh.removeAll(before);
+        fresh.remove(baseline(spark, c));
+        if (fresh.isEmpty()) return 0;
+        if (before.isEmpty())
+            throw new IllegalStateException("Missing pre-run snapshot inventory; refusing cleanup");
+        String gc =
+                spark.sql("SHOW TBLPROPERTIES " + c.table() + " ('gc.enabled')")
+                        .first()
+                        .getString(1);
+        if (!Set.of("true", "false").contains(gc))
+            throw new IllegalStateException("Unknown garbage-collection setting");
+        spark.sql("ALTER TABLE " + c.table() + " SET TBLPROPERTIES ('gc.enabled'='true')")
+                .collect();
+        try {
+            String ids =
+                    fresh.stream()
+                            .sorted()
+                            .map(Object::toString)
+                            .collect(java.util.stream.Collectors.joining(","));
+            spark.sql(
+                            "CALL "
+                                    + c.get("catalog.name")
+                                    + ".system.expire_snapshots(table => "
+                                    + Config.literal(c.shortTable())
+                                    + ", older_than => TIMESTAMP '1970-01-01 00:00:00',"
+                                    + " snapshot_ids => array("
+                                    + ids
+                                    + "))")
+                    .collect();
+        } finally {
+            spark.sql(
+                            "ALTER TABLE "
+                                    + c.table()
+                                    + " SET TBLPROPERTIES ('gc.enabled'="
+                                    + Config.literal(gc)
+                                    + ")")
+                    .collect();
+        }
+        return fresh.size();
+    }
+
     public static String compactionSql(Config c) {
         String strategy = c.get("benchmark.compactionStrategy", "sort");
         if (!Set.of("sort", "binpack").contains(strategy)) {
@@ -189,12 +266,18 @@ public final class Compaction {
         StringJoiner options = new StringJoiner(",");
         c.prefix("compaction.")
                 .forEach((k, v) -> options.add(Config.literal(k) + "," + Config.literal(v)));
-        return "CALL " + Config.identifier(c.get("catalog.name"))
-                + ".system.rewrite_data_files(table => " + Config.literal(c.shortTable())
-                + ", strategy => " + Config.literal(strategy)
+        return "CALL "
+                + Config.identifier(c.get("catalog.name"))
+                + ".system.rewrite_data_files(table => "
+                + Config.literal(c.shortTable())
+                + ", strategy => "
+                + Config.literal(strategy)
                 + (strategy.equals("sort")
-                        ? ", sort_order => 'cid ASC NULLS FIRST, sid ASC NULLS FIRST'" : "")
-                + ", options => map(" + options + "))";
+                        ? ", sort_order => 'cid ASC NULLS FIRST, sid ASC NULLS FIRST'"
+                        : "")
+                + ", options => map("
+                + options
+                + "))";
     }
 
     private static Map<String, String> redacted(Config c) {

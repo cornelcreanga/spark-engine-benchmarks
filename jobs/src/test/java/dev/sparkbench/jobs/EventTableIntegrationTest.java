@@ -41,24 +41,10 @@ public final class EventTableIntegrationTest {
                                 "spark.sql.extensions",
                                 "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
                         .config("spark.sql.catalog.bench", "org.apache.iceberg.spark.SparkCatalog");
-        if (System.getenv("BENCH_TEST_REST_URI") == null) {
-            builder.config("spark.sql.catalog.bench.type", "hadoop")
-                    .config(
-                            "spark.sql.catalog.bench.warehouse",
-                            temporary.resolve("warehouse").toUri().toString());
-        } else {
-            builder.config("spark.sql.catalog.bench.type", "rest")
-                    .config("spark.sql.catalog.bench.uri", System.getenv("BENCH_TEST_REST_URI"))
-                    .config("spark.sql.catalog.bench.warehouse", "s3://spark-bench/warehouse")
-                    .config("spark.sql.catalog.bench.io-impl", "org.apache.iceberg.aws.s3.S3FileIO")
-                    .config(
-                            "spark.sql.catalog.bench.s3.endpoint",
-                            System.getenv("BENCH_TEST_S3_ENDPOINT"))
-                    .config("spark.sql.catalog.bench.s3.path-style-access", "true")
-                    .config("spark.sql.catalog.bench.s3.access-key-id", "test")
-                    .config("spark.sql.catalog.bench.s3.secret-access-key", "test")
-                    .config("spark.sql.catalog.bench.client.region", "us-east-1");
-        }
+        builder.config("spark.sql.catalog.bench.type", "hadoop")
+                .config(
+                        "spark.sql.catalog.bench.warehouse",
+                        temporary.resolve("warehouse").toUri().toString());
         try (SparkSession spark = builder.getOrCreate()) {
             spark.sparkContext().setLogLevel("WARN");
             spark.sql("CREATE NAMESPACE IF NOT EXISTS bench.event_model_test");
@@ -105,10 +91,6 @@ public final class EventTableIntegrationTest {
                     ((Number) Compaction.stats(spark, config).get("files")).longValue();
             check(compactedFiles < originalFiles, "compaction actually rewrote the files");
             TableValidation.run(spark, config);
-            if (Boolean.parseBoolean(System.getenv("BENCH_TEST_KEEP_COMPACTED"))) {
-                System.out.println("Compacted table retained for independent Trino validation");
-                return;
-            }
             spark.sql(
                     "UPDATE "
                             + config.table()
@@ -173,6 +155,18 @@ public final class EventTableIntegrationTest {
                         expected.getMessage().contains("different settings"),
                         "input mismatch reason");
             }
+            Config simple =
+                    reusable.with("catalog.table", "SimpleEventName")
+                            .with("dataset.includeAttributes", "false")
+                            .with("dataset.rows", "201")
+                            .with("dataset.calibrationRows", "77")
+                            .with("dataset.maxBatchRows", "100");
+            Generator.prepare(spark, simple);
+            check(spark.table(simple.table()).schema().length() == 29, "scalar-only table schema");
+            check(
+                    spark.table(simple.table()).count() == 201,
+                    "fixed rows across final partial batch");
+            Generator.prepare(spark, simple);
             Config incomplete = reusable.with("catalog.table", "incomplete_events");
             spark.sql(Generator.createTableSql(incomplete));
             try {

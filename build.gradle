@@ -52,6 +52,7 @@ project(':results') {
 
 project(':jobs') {
     dependencies {
+        compileOnly "org.apache.iceberg:iceberg-spark-runtime-4.0_${scalaBinary}:${icebergVersion}"
         implementation project(':core')
         implementation project(':dataset-generator')
         implementation project(':benchmarks')
@@ -127,7 +128,6 @@ project(':jobs') {
     dependencies {
         testImplementation "org.apache.spark:spark-sql_${scalaBinary}:${compileSparkVersion}"
         testRuntimeOnly "org.apache.iceberg:iceberg-spark-runtime-4.0_${scalaBinary}:${icebergVersion}"
-        testRuntimeOnly "org.apache.iceberg:iceberg-aws-bundle:${icebergVersion}"
     }
     tasks.register('verifyEventTable', JavaExec) {
         dependsOn testClasses
@@ -143,3 +143,26 @@ project(':jobs') {
 tasks.named('verify') {
     dependsOn ':jobs:verifyEventTable'
 }
+
+project(':dataset-generator') {
+    tasks.register('verifyOcsf', JavaExec) {
+        dependsOn testClasses
+        classpath = sourceSets.test.runtimeClasspath
+        mainClass = 'dev.sparkbench.dataset.OcsfSelfTest'
+        workingDir = rootDir
+        maxHeapSize = '2g'
+    }
+}
+tasks.named('verify') { dependsOn ':dataset-generator:verifyOcsf' }
+project(':jobs') {
+    tasks.register('verifyOcsfTable', JavaExec) {
+        dependsOn testClasses
+        classpath = sourceSets.test.runtimeClasspath
+        mainClass = 'dev.sparkbench.jobs.OcsfTableIntegrationTest'
+        workingDir = rootDir
+        maxHeapSize = '3g'
+        jvmArgs '--add-opens=java.base/sun.nio.ch=ALL-UNNAMED',
+                '--add-opens=java.base/java.nio=ALL-UNNAMED'
+    }
+}
+tasks.named('verify') { dependsOn ':jobs:verifyOcsfTable' }

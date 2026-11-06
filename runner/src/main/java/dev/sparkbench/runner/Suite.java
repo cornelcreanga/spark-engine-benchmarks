@@ -54,6 +54,9 @@ final class Suite {
     }
 
     void packages(Config c) throws Exception {
+        if (c.get("engine.operator", "spark").equals("quanton")) {
+            Quanton.prepare(c, this);
+        }
         packagePrefix(c, "benchmark.");
         packagePrefix(c, "engine.");
     }
@@ -90,6 +93,7 @@ final class Suite {
 
     Path job(Config c, String action, String label) throws Exception {
         String name = "sb-" + label + "-" + UUID.randomUUID().toString().substring(0, 8);
+        c = c.with("benchmark.applicationName", name);
         Path dir = output.resolve(name);
         Files.createDirectories(dir);
         Path properties = dir.resolve("job.properties");
@@ -111,6 +115,12 @@ final class Suite {
         apply(manifest);
         Exception failure = null;
         try {
+            if (c.get("engine.operator", "spark").equals("quanton")) {
+                Quanton.awaitApplication(c, name, this);
+            }
+            if (action.equals("compact") && c.get("benchmark.cacheMode", "none").equals("warm")) {
+                Files.writeString(dir.resolve("warmup.json"), NodeWarmup.run(c, name, this));
+            }
             long deadline = System.nanoTime() + c.number("spark.timeoutSeconds") * 1_000_000_000L;
             while (true) {
                 String state =
@@ -140,6 +150,11 @@ final class Suite {
             try {
                 String status = kubectl("get", "sparkapplication", name, "-o", "json");
                 Files.writeString(dir.resolve("status.json"), status);
+                if (c.get("engine.operator", "spark").equals("quanton")) {
+                    Files.writeString(
+                            dir.resolve("quanton-status.json"),
+                            kubectl("get", "quantonsparkapplication", name, "-o", "json"));
+                }
             } catch (Exception e) {
                 Files.writeString(dir.resolve("status-error.txt"), e.toString());
             }
@@ -222,6 +237,16 @@ final class Suite {
         if (failure != null) {
             if (!safeToRestore) {
                 try {
+                    if (c.get("engine.operator", "spark").equals("quanton")) {
+                        kubectl(
+                                "delete",
+                                "quantonsparkapplication",
+                                name,
+                                "--ignore-not-found=true",
+                                "--cascade=foreground",
+                                "--wait=true",
+                                "--timeout=120s");
+                    }
                     kubectl(
                             "delete",
                             "sparkapplication",
@@ -249,11 +274,29 @@ final class Suite {
     }
 
     void run(List<Config> engines, Config control) throws Exception {
-        for (Config engine : engines) {
-            packages(engine);
-            for (int repetition = 1;
-                    repetition <= base.integer("benchmark.repetitions");
-                    repetition++) {
+        int sequence = 0;
+        Set<Integer> completed = new HashSet<>();
+        for (String value : base.get("benchmark.completedSequences", "").split(",")) {
+            if (!value.isBlank()) completed.add(Integer.parseInt(value.trim()));
+        }
+        int total = engines.size() * base.integer("benchmark.repetitions");
+        if (completed.stream().anyMatch(value -> value < 1 || value > total)) {
+            throw new IllegalArgumentException("Completed sample sequence is outside this run");
+        }
+        for (int repetition = 1;
+                repetition <= base.integer("benchmark.repetitions");
+                repetition++) {
+            List<Config> ordered = new ArrayList<>(engines);
+            if (base.flag("benchmark.alternateOrder") && repetition % 2 == 0) {
+                Collections.reverse(ordered);
+            }
+            for (Config engine : ordered) {
+                sequence++;
+                if (completed.contains(sequence)) {
+                    System.out.println("Retaining previously completed sample " + sequence);
+                    continue;
+                }
+                packages(engine);
                 job(control, "reset", "prepare");
                 Exception failure = null;
                 Path benchmarkDirectory = null;
@@ -265,9 +308,17 @@ final class Suite {
                 try {
                     String label = engine.get("engine.name") + "-r" + repetition;
                     benchmarkDirectory =
-                            job(engine.with("benchmark.deferRestore", "true")
-                                    .with("validation.enabled", Boolean.toString(validationEnabled)),
-                                    "compact", label);
+                            job(
+                                    engine.with("benchmark.deferRestore", "true")
+                                            .with(
+                                                    "benchmark.repetition",
+                                                    Integer.toString(repetition))
+                                            .with("benchmark.sequence", Integer.toString(sequence))
+                                            .with(
+                                                    "validation.enabled",
+                                                    Boolean.toString(validationEnabled)),
+                                    "compact",
+                                    label);
                     if (validationEnabled) {
                         job(control, "validate", label + "-oss-validation");
                         ossSparkPassed = true;
@@ -307,13 +358,17 @@ final class Suite {
                                         "validationEnabled",
                                         validationEnabled,
                                         "validationStatus",
-                                        validationEnabled ? (validatorsPassed ? "passed" : "failed") : "skipped",
+                                        validationEnabled
+                                                ? (validatorsPassed ? "passed" : "failed")
+                                                : "skipped",
                                         "validatorsPassed",
                                         validationEnabled ? validatorsPassed : null,
                                         "ossSparkValidation",
                                         validationEnabled ? ossSparkPassed : null,
                                         "trinoValidation",
-                                        validationEnabled && base.flag("validation.trino.enabled") ? trinoPassed : null,
+                                        validationEnabled && base.flag("validation.trino.enabled")
+                                                ? trinoPassed
+                                                : null,
                                         "trinoValidationEnabled",
                                         validationEnabled && base.flag("validation.trino.enabled"),
                                         "baselineRestored",

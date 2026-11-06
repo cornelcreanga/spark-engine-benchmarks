@@ -1,0 +1,14 @@
+{
+  "version": "1.9.0",
+  "source": "https://schema.ocsf.io/1.9.0/export/v2/schema",
+  "sourceSha256": "e8d90dd64eb6aefa42c976363fd3628dc8c13d4f5021e1005128e3abcec5e95d",
+  "catalogSha256": "77cd9e6934b4483dd24d2284def9454e89051fe7ce631f27b8fab46cdeb12083",
+  "classes": 86,
+  "extensions": [
+    "linux",
+    "macos",
+    "win"
+  ],
+  "flattenObjectDepth": 3,
+  "selection": "Class presence descending, then shallower paths, then path name; arrays/objects stay in map."
+}

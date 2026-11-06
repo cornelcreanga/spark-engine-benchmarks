@@ -35,13 +35,15 @@ public final class TableValidation {
                     spark.sql(
                                     "SELECT count(*) FROM "
                                             + config.table()
-                                            + " WHERE cid IS NULL OR sid IS NULL OR"
-                                            + " cid NOT RLIKE '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' OR"
-                                            + " sid NOT RLIKE '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'")
+                                            + " WHERE cid IS NULL OR sid IS NULL OR cid NOT RLIKE"
+                                            + " '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'"
+                                            + " OR sid NOT RLIKE"
+                                            + " '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'")
                             .first()
                             .getLong(0);
             if (invalidIds != 0) {
-                throw new IllegalStateException("Customer/system UUIDs must be canonical version-4 strings");
+                throw new IllegalStateException(
+                        "Customer/system UUIDs must be canonical version-4 strings");
             }
             report.put("uuidStringsValid", true);
             long baseline = Compaction.baseline(spark, config);

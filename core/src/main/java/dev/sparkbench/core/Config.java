@@ -25,13 +25,20 @@ public final class Config implements Serializable {
                 p.containsKey("config.parent")
                         ? load(path.resolveSibling(p.getProperty("config.parent")), seen)
                         : new Config();
+        if (p.containsKey("config.includes")) {
+            for (String include : p.getProperty("config.includes").split(",")) {
+                c = c.overlay(load(path.resolveSibling(include.trim()), seen));
+            }
+        }
+        Config merged = c;
         p.forEach(
                 (k, v) -> {
-                    if (!k.equals("config.parent")) {
-                        c.values.put(k.toString(), v.toString().trim());
+                    if (!k.equals("config.parent") && !k.equals("config.includes")) {
+                        merged.values.put(k.toString(), v.toString().trim());
                     }
                 });
-        return c;
+        seen.remove(path);
+        return merged;
     }
 
     public Config overlay(Config other) {
@@ -135,19 +142,73 @@ public final class Config implements Serializable {
         return weights;
     }
 
+    public boolean filesystemStorage() {
+        return get("storage.backend", "filesystem").equals("filesystem");
+    }
+
     public boolean validationEnabled() {
         return Boolean.parseBoolean(get("validation.enabled", "true"));
     }
 
     public void validate() {
         table();
+        if (!Set.of("s3", "filesystem").contains(get("storage.backend", "filesystem"))) {
+            throw new IllegalArgumentException("storage.backend must be s3 or filesystem");
+        }
+        if (filesystemStorage()) {
+            java.net.URI warehouse = java.net.URI.create(get("catalog.warehouse"));
+            Path mount = Path.of(get("filesystem.mountPath")).normalize();
+            if (!"file".equals(warehouse.getScheme())
+                    || !mount.isAbsolute()
+                    || !Path.of(warehouse).normalize().startsWith(mount)) {
+                throw new IllegalArgumentException(
+                        "Filesystem warehouse must be a file URI under filesystem.mountPath");
+            }
+            if (!get("filesystem.claim").matches("[a-z][a-z0-9-]{0,62}")) {
+                throw new IllegalArgumentException("Invalid filesystem.claim");
+            }
+            if (flag("validation.trino.enabled")) {
+                throw new IllegalArgumentException(
+                        "Filesystem mode currently supports the OSS validator only; disable Trino");
+            }
+        }
+        if (!Set.of("none", "warm").contains(get("benchmark.cacheMode", "none"))) {
+            throw new IllegalArgumentException("benchmark.cacheMode must be none or warm");
+        }
+        if (get("benchmark.cacheMode", "none").equals("warm")) {
+            double fraction = decimal("benchmark.warmCacheMinResidentFraction");
+            if (!filesystemStorage()
+                    || number("benchmark.warmCacheTimeoutSeconds") <= 0
+                    || !Double.isFinite(fraction)
+                    || fraction <= 0
+                    || fraction > 1) {
+                throw new IllegalArgumentException(
+                        "Warm-cache mode requires local filesystem, a timeout, and a residency"
+                                + " fraction in (0,1]");
+            }
+        }
+        if (flag("benchmark.discardOutputs") && (!filesystemStorage() || validationEnabled())) {
+            throw new IllegalArgumentException(
+                    "Discarding current-run outputs requires filesystem mode and disabled data"
+                            + " validation");
+        }
+        if (!Set.of("spark", "quanton").contains(get("engine.operator", "spark"))) {
+            throw new IllegalArgumentException("engine.operator must be spark or quanton");
+        }
+        if (get("engine.operator", "spark").equals("quanton") && !filesystemStorage()) {
+            throw new IllegalArgumentException(
+                    "Quanton currently requires a shared filesystem profile");
+        }
         if (!Set.of("sort", "binpack").contains(get("benchmark.compactionStrategy", "sort"))) {
-            throw new IllegalArgumentException("benchmark.compactionStrategy must be sort or binpack");
+            throw new IllegalArgumentException(
+                    "benchmark.compactionStrategy must be sort or binpack");
         }
         if (!Set.of("true", "false").contains(get("validation.enabled", "true"))) {
             throw new IllegalArgumentException("validation.enabled must be true or false");
         }
         if (values.containsKey("image.icebergVersion")
+                && !(get("engine.operator", "spark").equals("quanton")
+                        && get("image.icebergVersion").equals("bundled"))
                 && !Set.of("1.11.0", "1.12.0").contains(get("image.icebergVersion"))) {
             throw new IllegalArgumentException("Supported Iceberg runtimes: 1.11.0 and 1.12.0");
         }
@@ -176,6 +237,15 @@ public final class Config implements Serializable {
                 throw new IllegalArgumentException(k + " must be positive");
             }
         }
+        if (values.containsKey("dataset.minBatches") && number("dataset.minBatches") <= 0) {
+            throw new IllegalArgumentException("dataset.minBatches must be positive");
+        }
+        if (values.containsKey("dataset.rows") && number("dataset.rows") <= 0) {
+            throw new IllegalArgumentException("dataset.rows must be positive");
+        }
+        if (!Set.of("true", "false").contains(get("dataset.includeAttributes", "true"))) {
+            throw new IllegalArgumentException("dataset.includeAttributes must be true or false");
+        }
         if (integer("dataset.customers") < integer("dataset.buckets")) {
             throw new IllegalArgumentException("Need at least one customer per bucket");
         }
@@ -200,7 +270,27 @@ public final class Config implements Serializable {
                                 .truncatedTo(java.time.temporal.ChronoUnit.HOURS))) {
             throw new IllegalArgumentException("dataset.hour must be an exact UTC hour");
         }
-        weights("dataset.eventWeights", 7);
+        if (!Set.of("legacy", "ocsf").contains(get("dataset.model", "legacy"))) {
+            throw new IllegalArgumentException("dataset.model must be legacy or ocsf");
+        }
+        if (get("dataset.model", "legacy").equals("ocsf")) {
+            if (integer("dataset.ocsf.topLevelFields") <= 0)
+                throw new IllegalArgumentException("Need OCSF fields");
+            for (String key :
+                    List.of(
+                            "dataset.ocsf.optionalFieldProbability",
+                            "dataset.ocsf.recommendedFieldProbability")) {
+                double probability = decimal(key);
+                if (!Double.isFinite(probability) || probability < 0 || probability > 1)
+                    throw new IllegalArgumentException("Invalid " + key);
+            }
+            for (var entry : prefix("dataset.eventWeight.").entrySet()) {
+                double weight = Double.parseDouble(entry.getValue());
+                if (!Double.isFinite(weight) || weight < 0)
+                    throw new IllegalArgumentException(
+                            "Invalid OCSF event weight: " + entry.getKey());
+            }
+        } else weights("dataset.eventWeights", 7);
         if (values.containsKey("dataset.bucketWeights")) {
             weights("dataset.bucketWeights", integer("dataset.buckets"));
         }

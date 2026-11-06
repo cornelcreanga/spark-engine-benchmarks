@@ -94,6 +94,10 @@ final class Images {
     }
 
     static void build(Config c) throws Exception {
+        if (c.get("engine.operator", "spark").equals("quanton")) {
+            System.out.println("Quanton uses its operator-managed image; no local image is built.");
+            return;
+        }
         Path dir = prepare(c);
         System.out.print(
                 Commands.run(

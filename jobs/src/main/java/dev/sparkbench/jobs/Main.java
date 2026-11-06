@@ -22,7 +22,14 @@ public final class Main {
             spark.conf().set("spark.sql.session.timeZone", "UTC");
             switch (args[0]) {
                 case "generate" -> Generator.generate(spark, c);
-                case "prepare" -> Generator.prepare(spark, c);
+                case "prepare" -> {
+                    if (c.filesystemStorage() && c.flag("filesystem.importFromS3")) {
+                        FilesystemInput.prepare(spark, c);
+                    } else {
+                        Generator.prepare(spark, c);
+                    }
+                }
+                case "cleanup-outputs" -> FilesystemInput.expireApprovedOutputs(spark, c);
                 case "compact" -> Compaction.run(spark, c);
                 case "validate" -> TableValidation.run(spark, c);
                 case "reset" -> Compaction.reset(spark, c);

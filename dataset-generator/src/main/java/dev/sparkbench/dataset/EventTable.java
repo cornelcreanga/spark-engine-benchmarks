@@ -59,6 +59,31 @@ public final class EventTable {
     public static final StructType GENERATION_SCHEMA =
             SCHEMA.add("_bucket", DataTypes.IntegerType, false);
 
+    public static final StructType TOP_LEVEL_SCHEMA =
+            new StructType(
+                    java.util.Arrays.stream(SCHEMA.fields())
+                            .filter(field -> !field.name().equals("attributes"))
+                            .toArray(StructField[]::new));
+
+    public static final StructType TOP_LEVEL_GENERATION_SCHEMA =
+            TOP_LEVEL_SCHEMA.add("_bucket", DataTypes.IntegerType, false);
+
+    public static StructType schema(Config config) {
+        if (config.get("dataset.model", "legacy").equals("ocsf"))
+            return OcsfCatalog.INSTANCE.schema(config);
+        return Boolean.parseBoolean(config.get("dataset.includeAttributes", "true"))
+                ? SCHEMA
+                : TOP_LEVEL_SCHEMA;
+    }
+
+    public static StructType generationSchema(Config config) {
+        if (config.get("dataset.model", "legacy").equals("ocsf"))
+            return schema(config).add("_bucket", DataTypes.IntegerType, false);
+        return Boolean.parseBoolean(config.get("dataset.includeAttributes", "true"))
+                ? GENERATION_SCHEMA
+                : TOP_LEVEL_GENERATION_SCHEMA;
+    }
+
     private EventTable() {}
 
     public static Row row(MachineEvent event, Config config, SplittableRandom random, int bucket) {
@@ -83,9 +108,9 @@ public final class EventTable {
         values.put("attributes", scala.jdk.javaapi.CollectionConverters.asScala(attributes));
         values.put("_bucket", bucket);
 
-        Object[] row = new Object[GENERATION_SCHEMA.length()];
+        Object[] row = new Object[generationSchema(config).length()];
         for (int index = 0; index < row.length; index++) {
-            StructField field = GENERATION_SCHEMA.fields()[index];
+            StructField field = generationSchema(config).fields()[index];
             Object value = values.get(field.name());
             if (value == null && !field.nullable()) {
                 throw new IllegalArgumentException("Missing required event field: " + field.name());

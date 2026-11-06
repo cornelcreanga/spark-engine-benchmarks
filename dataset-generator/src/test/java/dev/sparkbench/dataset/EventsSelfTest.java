@@ -13,7 +13,6 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.HexFormat;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -29,6 +28,7 @@ public final class EventsSelfTest {
 
     public static void main(String[] args) throws Exception {
         Config base = Config.load(Path.of("config/local.properties"));
+        verifyTopLevelOnly(base);
         verifyUuidStorage();
         verifyConcreteEvents(base);
         verifyStableSystemIds(base);
@@ -41,20 +41,61 @@ public final class EventsSelfTest {
                         + "4/16/256 buckets, payload bytes, deterministic events, UUIDs, skew");
     }
 
+    private static void verifyTopLevelOnly(Config base) throws Exception {
+        Config simple = base.with("dataset.includeAttributes", "false");
+        Events fullEvents = new Events(base), simpleEvents = new Events(simple);
+        var serializer =
+                ExpressionEncoder.apply(EventTable.generationSchema(simple)).createSerializer();
+        check(EventTable.schema(simple).length() == 29, "29 scalar event columns");
+        for (StructField field : EventTable.schema(simple).fields()) {
+            check(!field.name().equals("attributes"), "map is absent");
+        }
+        for (long index = 0; index < 1000; index++) {
+            Row full = fullEvents.row(index), scalar = simpleEvents.row(index);
+            serializer.apply(scalar);
+            for (int column = 0; column < 29; column++) {
+                check(
+                        Objects.equals(full.get(column), scalar.get(column)),
+                        "scalar values match map-bearing events");
+            }
+            check(Objects.equals(full.get(30), scalar.get(29)), "same Iceberg bucket");
+        }
+        check(
+                !Generator.inputFingerprint(base).equals(Generator.inputFingerprint(simple)),
+                "schema variants have different input contracts");
+        check(
+                EventTable.schema(simple).apply("message").dataType().typeName().equals("string"),
+                "simple table retains message");
+        check(!Generator.createTableSql(simple).contains("attributes"), "simple DDL excludes map");
+    }
+
     private static void verifyUuidStorage() {
         UUID customer = UUID.fromString("00112233-4455-4677-8899-aabbccddeeff");
         UUID system = UUID.fromString("fedcba98-7654-4321-89ab-cdef01234567");
-        EventMetadata metadata = new EventMetadata(
-                customer, Instant.EPOCH, customer.toString(), system.toString(), "host", "user");
-        EventMetadata equal = new EventMetadata(
-                customer, Instant.EPOCH, customer.toString().toUpperCase(),
-                system.toString().toUpperCase(), "host", "user");
-        check(metadata.equals(equal) && metadata.hashCode() == equal.hashCode(),
+        EventMetadata metadata =
+                new EventMetadata(
+                        customer,
+                        Instant.EPOCH,
+                        customer.toString(),
+                        system.toString(),
+                        "host",
+                        "user");
+        EventMetadata equal =
+                new EventMetadata(
+                        customer,
+                        Instant.EPOCH,
+                        customer.toString().toUpperCase(),
+                        system.toString().toUpperCase(),
+                        "host",
+                        "user");
+        check(
+                metadata.equals(equal) && metadata.hashCode() == equal.hashCode(),
                 "canonical UUID string value equality");
         check(metadata.customerId().equals(customer.toString()), "canonical customer UUID");
         check(metadata.systemId().equals(system.toString()), "canonical system UUID");
         try {
-            new EventMetadata(customer, Instant.EPOCH, "invalid", system.toString(), "host", "user");
+            new EventMetadata(
+                    customer, Instant.EPOCH, "invalid", system.toString(), "host", "user");
             throw new AssertionError("accepted an invalid UUID string");
         } catch (IllegalArgumentException expected) {
         }
@@ -230,8 +271,10 @@ public final class EventsSelfTest {
             int bucket = row.getInt(Events.SCHEMA.fieldIndex("_bucket"));
             String customerId = row.getString(EventTable.SCHEMA.fieldIndex("cid"));
             String systemId = row.getString(EventTable.SCHEMA.fieldIndex("sid"));
-            check(UUID.fromString(customerId).toString().equals(customerId)
-                    && UUID.fromString(systemId).toString().equals(systemId), "canonical UUID string columns");
+            check(
+                    UUID.fromString(customerId).toString().equals(customerId)
+                            && UUID.fromString(systemId).toString().equals(systemId),
+                    "canonical UUID string columns");
             int actualIcebergBucket =
                     org.apache.iceberg.transforms.Transforms.<String>bucket(
                                     org.apache.iceberg.types.Types.StringType.get(), buckets)

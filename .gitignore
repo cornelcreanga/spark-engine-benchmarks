@@ -10,3 +10,5 @@ __pycache__/
 .env
 .env.*
 .DS_Store
+**/onehouse-values*.yaml
+**/onehouse-values*.yml

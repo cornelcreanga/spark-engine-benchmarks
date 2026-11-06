@@ -358,7 +358,7 @@ PY
     fi
 }
 step 'Check node capacity, storage, and existing jobs' check_cluster
-step 'Provision LocalStack, catalog, Trino, and Spark Operator' "$RUNNER" provision "$RUNTIME_CONFIG"
+step 'Provision configured storage, catalog, and Spark Operator' "$RUNNER" provision "$RUNTIME_CONFIG"
 step 'Wait for SparkApplication API' kubectl --context "$CONTEXT" wait \
     --for=condition=Established crd/sparkapplications.sparkoperator.k8s.io --timeout=120s
 

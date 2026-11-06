@@ -35,18 +35,24 @@ final class Manifests {
                 "spark.sql.extensions",
                 "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions");
         conf.put(catalog, "org.apache.iceberg.spark.SparkCatalog");
-        conf.put(catalog + ".type", "rest");
-        conf.put(catalog + ".uri", c.get("catalog.uri"));
-        conf.put(catalog + ".warehouse", c.get("catalog.warehouse"));
-        conf.put(catalog + ".io-impl", "org.apache.iceberg.aws.s3.S3FileIO");
-        conf.put(catalog + ".s3.endpoint", c.get("s3.endpoint"));
-        conf.put(catalog + ".s3.path-style-access", "true");
-        conf.put(catalog + ".client.region", c.get("s3.region"));
-        if (c.all().containsKey("s3.accessKey")) {
-            conf.put(catalog + ".s3.access-key-id", c.get("s3.accessKey"));
-        }
-        if (c.all().containsKey("s3.secretKey")) {
-            conf.put(catalog + ".s3.secret-access-key", c.get("s3.secretKey"));
+        if (c.filesystemStorage()) {
+            conf.put(catalog + ".type", "hadoop");
+            conf.put(catalog + ".warehouse", c.get("catalog.warehouse"));
+            conf.put(catalog + ".io-impl", "org.apache.iceberg.hadoop.HadoopFileIO");
+        } else {
+            conf.put(catalog + ".type", "rest");
+            conf.put(catalog + ".uri", c.get("catalog.uri"));
+            conf.put(catalog + ".warehouse", c.get("catalog.warehouse"));
+            conf.put(catalog + ".io-impl", "org.apache.iceberg.aws.s3.S3FileIO");
+            conf.put(catalog + ".s3.endpoint", c.get("s3.endpoint"));
+            conf.put(catalog + ".s3.path-style-access", "true");
+            conf.put(catalog + ".client.region", c.get("s3.region"));
+            if (c.all().containsKey("s3.accessKey")) {
+                conf.put(catalog + ".s3.access-key-id", c.get("s3.accessKey"));
+            }
+            if (c.all().containsKey("s3.secretKey")) {
+                conf.put(catalog + ".s3.secret-access-key", c.get("s3.secretKey"));
+            }
         }
         conf.put("spark.sql.shuffle.partitions", c.get("spark.shufflePartitions"));
         conf.put("spark.dynamicAllocation.enabled", "false");
@@ -80,6 +86,19 @@ final class Manifests {
                         c.get("spark.executor.memory"),
                         "memoryOverhead",
                         c.get("spark.executor.memoryOverhead"));
+        if (c.filesystemStorage()) {
+            Object mounts =
+                    List.of(
+                            map(
+                                    "name",
+                                    "benchmark-warehouse",
+                                    "mountPath",
+                                    c.get("filesystem.mountPath")));
+            driver.put("volumeMounts", mounts);
+            executor.put("volumeMounts", mounts);
+            driver.put("podSecurityContext", map("fsGroup", 185));
+            executor.put("podSecurityContext", map("fsGroup", 185));
+        }
         if (c.all().containsKey("k8s.credentialsSecret")) {
             Object from = List.of(map("secretRef", map("name", c.get("k8s.credentialsSecret"))));
             driver.put("envFrom", from);
@@ -100,7 +119,9 @@ final class Manifests {
                         "mainClass",
                         "dev.sparkbench.jobs.Main",
                         "mainApplicationFile",
-                        "local:///opt/spark/bench/spark-bench-jobs.jar",
+                        c.get(
+                                "engine.mainApplicationFile",
+                                "local:///opt/spark/bench/spark-bench-jobs.jar"),
                         "arguments",
                         List.of(action, "/etc/spark-bench/job.properties"),
                         "restartPolicy",
@@ -111,6 +132,25 @@ final class Manifests {
                         driver,
                         "executor",
                         executor);
+        if (c.filesystemStorage()) {
+            spec.put(
+                    "volumes",
+                    List.of(
+                            map(
+                                    "name",
+                                    "benchmark-warehouse",
+                                    "persistentVolumeClaim",
+                                    map("claimName", c.get("filesystem.claim")))));
+        }
+        if (c.get("engine.operator", "spark").equals("quanton")) {
+            return resource(
+                    "quantonsparkoperator.onehouse.ai/v1beta2",
+                    "QuantonSparkApplication",
+                    name,
+                    c,
+                    "spec",
+                    map("sparkApplicationSpec", spec));
+        }
         return resource("sparkoperator.k8s.io/v1beta2", "SparkApplication", name, c, "spec", spec);
     }
 

@@ -35,6 +35,8 @@ if "apply" in args:
         action = v["spec"]["arguments"][0]
         s["apps"][name] = action
         s["actions"].append(action)
+        if action == "compact":
+            s.setdefault("compactNames", []).append(name)
 elif "exec" in args:
     print("WARNING: fake CLI diagnostic", file=sys.stderr)
     sql = args[args.index("--execute") + 1]
@@ -116,6 +118,8 @@ print(out)
     (tmp / "state.json").unlink()
     env.pop("FAKE_FAIL")
     env.pop("FAKE_STOP_FAIL")
+    with config.open("a") as f:
+        f.write("storage.backend=s3\ncatalog.uri=http://external-catalog:8181\ncatalog.warehouse=s3://external-bench/warehouse\ns3.endpoint=https://s3.example.test\ns3.region=us-east-1\nvalidation.trino.enabled=true\n")
     env["FAKE_TRINO_FAIL"] = "1"
     result = subprocess.run(cmd, env=env, capture_output=True, text=True)
     assert result.returncode != 0, "Trino mismatch was accepted"
@@ -139,6 +143,24 @@ print(out)
         capture_output=True, text=True)
     assert fast_report.returncode == 0, fast_report.stderr
     assert "validationSkipped=2" in fast_report.stdout
+    (tmp / "state.json").unlink()
+    with config.open("a") as f:
+        f.write("benchmark.repetitions=2\nbenchmark.alternateOrder=true\n")
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    state = json.loads((tmp / "state.json").read_text())
+    order = [name.split("-r")[0] for name in state["compactNames"]]
+    assert order == ["sb-oss", "sb-custom", "sb-custom", "sb-oss"], order
+    (tmp / "state.json").unlink()
+    with config.open("a") as f:
+        f.write("benchmark.completedSequences=1,3\n")
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    state = json.loads((tmp / "state.json").read_text())
+    order = [name.split("-r")[0] for name in state["compactNames"]]
+    assert order == ["sb-custom", "sb-oss"], order
+    assert "-r1-" in state["compactNames"][0] and "-r2-" in state["compactNames"][1]
+    assert state["actions"] == ["reset", "compact", "reset"] * 2, state
     fixture = tmp / "summary-fixture"
     fixture.mkdir()
     (fixture / "results.jsonl").write_text(

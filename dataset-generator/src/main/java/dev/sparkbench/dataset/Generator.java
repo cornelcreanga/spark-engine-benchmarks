@@ -15,6 +15,15 @@ import java.util.*;
 public final class Generator {
     public static final String GENERATOR_VERSION = "event-generator-v4";
 
+    private static String generatorVersion(Config c) {
+        return c.get("dataset.model", "legacy").equals("ocsf")
+                ? "ocsf-generator-v1-"
+                        + OcsfCatalog.VERSION
+                        + "-"
+                        + OcsfCatalog.INSTANCE.catalogSha256
+                : GENERATOR_VERSION;
+    }
+
     public static void prepare(SparkSession spark, Config config) throws Exception {
         if (!spark.catalog().tableExists(config.table())) {
             generate(spark, config);
@@ -27,7 +36,7 @@ public final class Generator {
     public static void verifyExistingInput(SparkSession spark, Config config) throws Exception {
         String advice = "; use --fresh-input to generate a new table without deleting this one";
         if (!DataType.equalsIgnoreNullability(
-                EventTable.SCHEMA, spark.table(config.table()).schema())) {
+                EventTable.schema(config), spark.table(config.table()).schema())) {
             throw new IllegalStateException("Existing input schema is incompatible" + advice);
         }
         List<Row> tags =
@@ -54,7 +63,8 @@ public final class Generator {
         long snapshot = ((Number) tags.get(0).get(0)).longValue();
         Row files =
                 spark.sql(
-                                "SELECT coalesce(sum(file_size_in_bytes), 0), count(*) FROM "
+                                "SELECT coalesce(sum(file_size_in_bytes), 0), count(*),"
+                                        + " coalesce(sum(record_count),0) FROM "
                                         + config.table()
                                         + ".files VERSION AS OF "
                                         + snapshot)
@@ -62,9 +72,11 @@ public final class Generator {
         long bytes = ((Number) files.get(0)).longValue();
         double tolerance = config.decimal("dataset.sizeTolerance");
         long target = config.number("dataset.targetBytes");
+        boolean fixedRows = config.all().containsKey("dataset.rows");
         if (files.getLong(1) == 0
-                || bytes < target * (1 - tolerance)
-                || bytes > target * (1 + tolerance)) {
+                || (fixedRows
+                        ? files.getLong(2) != config.number("dataset.rows")
+                        : bytes < target * (1 - tolerance) || bytes > target * (1 + tolerance))) {
             throw new IllegalStateException(
                     "Existing input baseline is outside the requested size tolerance" + advice);
         }
@@ -72,9 +84,9 @@ public final class Generator {
 
     public static String inputFingerprint(Config config) throws Exception {
         String contract =
-                GENERATOR_VERSION
+                generatorVersion(config)
                         + "\n"
-                        + EventTable.SCHEMA.toDDL()
+                        + EventTable.schema(config).toDDL()
                         + "\n"
                         + Json.encode(config.prefix("dataset."));
         byte[] digest =
@@ -89,18 +101,21 @@ public final class Generator {
             throw new IllegalStateException(
                     "Table already exists; generation never overwrites input: " + table);
         }
+        org.apache.spark.api.java.function.MapPartitionsFunction<Long, Row> events =
+                c.get("dataset.model", "legacy").equals("ocsf") ? new OcsfEvents(c) : new Events(c);
         spark.sql(
                 "CREATE NAMESPACE IF NOT EXISTS "
                         + c.get("catalog.name")
                         + "."
                         + c.get("catalog.namespace"));
         spark.sql(createTableSql(c));
-        Events events = new Events(c);
         long target = c.number("dataset.targetBytes"), bytes = 0, rows = 0;
         double tolerance = c.decimal("dataset.sizeTolerance"),
                 bytesPerRow = c.integer("dataset.payloadBytes") * 0.8;
         int batch = 0;
-        while (bytes < target * (1 - tolerance)) {
+        boolean fixedRows = c.all().containsKey("dataset.rows");
+        long requestedRows = fixedRows ? c.number("dataset.rows") : 0;
+        while (fixedRows ? rows < requestedRows : bytes < target * (1 - tolerance)) {
             if (batch >= c.integer("dataset.maxBatches")) {
                 throw new IllegalStateException(
                         "Generation did not converge; increase maxBatches or target size");
@@ -113,9 +128,30 @@ public final class Generator {
             if (batch == 0) {
                 count = Math.min(count, Math.max(1, (long) (target / bytesPerRow / 4)));
             }
+            if (!fixedRows && c.all().containsKey("dataset.minBatches")) {
+                long remainingBatches = Math.max(1, c.number("dataset.minBatches") - batch);
+                count =
+                        Math.min(
+                                count,
+                                Math.max(
+                                        1,
+                                        (long)
+                                                Math.ceil(
+                                                        (target - bytes)
+                                                                / bytesPerRow
+                                                                / remainingBatches)));
+            }
+            if (fixedRows) {
+                count =
+                        Math.min(
+                                requestedRows - rows,
+                                batch == 0
+                                        ? c.number("dataset.calibrationRows")
+                                        : c.number("dataset.maxBatchRows"));
+            }
             Dataset<Row> data =
                     spark.range(rows, rows + count, 1, c.integer("dataset.partitions"))
-                            .mapPartitions(events, Encoders.row(Events.SCHEMA));
+                            .mapPartitions(events, Encoders.row(EventTable.generationSchema(c)));
             data.repartition(c.integer("dataset.partitions"), col("_bucket"), col("eventtype"))
                     .sortWithinPartitions("_bucket", "eventtype")
                     .drop("_bucket")
@@ -143,7 +179,7 @@ public final class Generator {
                     bytes,
                     target);
         }
-        if (bytes > target * (1 + tolerance)) {
+        if (!fixedRows && bytes > target * (1 + tolerance)) {
             throw new IllegalStateException(
                     "Generated bytes exceed tolerance: "
                             + bytes
@@ -169,14 +205,42 @@ public final class Generator {
                                 + " bytes,sum(record_count) rows FROM "
                                 + table
                                 + ".files GROUP BY partition ORDER BY partition")
-                .show(c.integer("dataset.buckets") * 7, false);
+                .show(
+                        c.integer("dataset.buckets")
+                                * (c.get("dataset.model", "legacy").equals("ocsf")
+                                        ? OcsfCatalog.INSTANCE.classes.length
+                                        : 7),
+                        false);
+        if (c.get("dataset.model", "legacy").equals("ocsf")) {
+            List<Map<String, Object>> distribution = new ArrayList<>();
+            for (Row row :
+                    spark.sql(
+                                    "SELECT partition.eventtype, sum(record_count), count(*),"
+                                            + " sum(file_size_in_bytes) FROM "
+                                            + table
+                                            + ".files GROUP BY partition.eventtype ORDER BY"
+                                            + " partition.eventtype")
+                            .collectAsList()) {
+                distribution.add(
+                        Map.of(
+                                "eventtype",
+                                row.getString(0),
+                                "records",
+                                row.getLong(1),
+                                "files",
+                                row.getLong(2),
+                                "bytes",
+                                row.getLong(3)));
+            }
+            System.out.println("OCSF_INPUT_DISTRIBUTION " + Json.encode(distribution));
+        }
     }
 
     public static String createTableSql(Config config) throws Exception {
         return "CREATE TABLE "
                 + config.table()
                 + " ("
-                + EventTable.SCHEMA.toDDL()
+                + EventTable.schema(config).toDDL()
                 + ") "
                 + "USING iceberg PARTITIONED BY (hours(eventtime), bucket("
                 + config.integer("dataset.buckets")
@@ -188,7 +252,7 @@ public final class Generator {
                 + " 'benchmark.input.fingerprint'='"
                 + inputFingerprint(config)
                 + "', 'benchmark.input.generator-version'='"
-                + GENERATOR_VERSION
+                + generatorVersion(config)
                 + "', 'gc.enabled'='false')";
     }
 

@@ -54,7 +54,8 @@ public final class Main {
                             control.get("engine.image")));
             for (int index = 0; index < engines.size(); index++) {
                 Config engine = engines.get(index);
-                if (!engine.get("engine.image").equals(control.get("engine.image"))) {
+                if (!engine.get("engine.operator", "spark").equals("quanton")
+                        && !engine.get("engine.image").equals(control.get("engine.image"))) {
                     imageDefinitions.add(
                             Map.of("config", args[index + 2], "image", engine.get("engine.image")));
                 }
@@ -113,6 +114,7 @@ public final class Main {
                     suite.job(control, "generate", "generate");
                 }
                 case "reset" -> suite.job(control, "reset", "reset");
+                case "cleanup-outputs" -> suite.job(control, "cleanup-outputs", "cleanup");
                 case "validate-trino" -> TrinoValidation.run(base, suite, "manual");
                 case "validate" -> suite.job(control, "validate", "validate");
                 case "run" -> suite.run(engines, control);
